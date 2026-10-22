@@ -1,0 +1,15 @@
+# Python and environments
+__pycache__/
+.venv/
+.env
+
+# Data and local databases
+data/
+*.csv
+*.parquet
+*.duckdb
+
+# Images
+images/
+*.jpg
+*.png
