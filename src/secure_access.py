@@ -1,11 +1,15 @@
 from functools import wraps
+from pathlib import Path
 import duckdb
 
+# Anchor paths to the project root (nova/)
+BASE_DIR = Path(__file__).resolve().parent.parent
+DB_PATH = BASE_DIR / "nova_warehouse.duckdb"
+
 # Simulated Identity & Access Management (IAM) context
-# In production, this would map to a JWT token, Active Directory, or OAuth session.
 CURRENT_USER_SESSION = {
     "username": "raphael_sec",
-    "role": "CYBER_SECURITY_AUDITOR"  # Change this to "OPERATOR" or "RELIABILITY_ENGINEER" to test
+    "role": "CYBER_SECURITY_AUDITOR"  # Change to "OPERATOR" or "RELIABILITY_ENGINEER" to test
 }
 
 def require_role(allowed_roles):
@@ -29,7 +33,7 @@ def require_role(allowed_roles):
 @require_role(["RELIABILITY_ENGINEER", "OPERATOR"])
 def query_operational_telemetry():
     """Operators and Engineers can view live telemetry."""
-    con = duckdb.connect("nova_warehouse.duckdb", read_only=True)
+    con = duckdb.connect(str(DB_PATH), read_only=True)
     results = con.execute("SELECT timestamp, temperature_c, pressure_psi FROM k101_sensor_logs LIMIT 5").fetchall()
     con.close()
     return results
@@ -38,34 +42,13 @@ def query_operational_telemetry():
 @require_role(["RELIABILITY_ENGINEER", "CYBER_SECURITY_AUDITOR"])
 def query_security_audit_logs():
     """Only Engineers and Security Auditors can view system audit trails and anomalies."""
-    con = duckdb.connect("nova_warehouse.duckdb", read_only=True)
+    con = duckdb.connect(str(DB_PATH), read_only=True)
     results = con.execute("SELECT * FROM ingestion_audit_log").fetchall()
     con.close()
     return results
 
 
-if __name__ == "__main__":
-    print(f"Active Session: {CURRENT_USER_SESSION['username']} ({CURRENT_USER_SESSION['role']})")
-    print("-" * 60)
-    
-    try:
-        print("Attempting to fetch operational telemetry...")
-        data = query_operational_telemetry()
-        print("Success:", data)
-    except Exception as e:
-        print(e)
-        
-    print("-" * 60)
-    
-    try:
-        print("Attempting to fetch security audit logs...")
-        logs = query_security_audit_logs()
-        print("Success:", logs)
-    except Exception as e:
-        print(e)
-
-from secure_access import CURRENT_USER_SESSION, query_operational_telemetry, query_security_audit_logs
-
+# --- Automated RBAC Matrix Verification Test ---
 def run_security_rbac_test():
     test_identities = [
         {"username": "john_operator", "role": "OPERATOR"},
@@ -95,5 +78,7 @@ def run_security_rbac_test():
         except PermissionError as e:
             print(f"  [ACCESS BLOCKED] Security Audit Logs -> Expected for {identity['role']}")
 
+
 if __name__ == "__main__":
+    # Run the automated matrix verification test when executed directly
     run_security_rbac_test()
