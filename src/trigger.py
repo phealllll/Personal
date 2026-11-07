@@ -2,57 +2,66 @@ import time
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from ingestor import run_etl_pipeline
+from ingestor import process_secure_payload
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / 'data'
+PAYLOAD_DIR = BASE_DIR / "landing_zone" / "payloads"
 
-class TelemetryHandler(FileSystemEventHandler):
-    def on_created(self, event):
+class EnterpriseLandingZoneHandler(FileSystemEventHandler):
+    def process_event(self, file_path_str):
+        file_path = Path(file_path_str)
         
-        if event.is_directory or not event.src_path.endswith('.csv'):
+        # Ignore directories or non-CSV files
+        if file_path.is_dir() or file_path.suffix != '.csv':
             return
+            
+        department = file_path.parent.name.upper()
+        print(f"\n[WATCHDOG] 📂 File detected in {department} zone: {file_path.name}")
         
-        file_path = Path(event.src_path)
-        print(f"\n[WATCHDOG] 🚨 Edge telemetry detected: {file_path.name}")
-        
-        
+        # Prevent read collisions by waiting for the file copy/write to finish
         self.wait_until_ready(file_path)
+        process_secure_payload(file_path)
+
+    def on_created(self, event):
+        # Triggers when a file is created directly
+        self.process_event(event.src_path)
         
-        print(f"[WATCHDOG] Lock released. Triggering Medallion ETL Pipeline...")
-        run_etl_pipeline()
-        print(f"[WATCHDOG] 💤 Ingestion complete. Returning to standby.")
+    def on_moved(self, event):
+        # Triggers if a file is atomically renamed (e.g., .tmp to .csv)
+        self.process_event(event.dest_path)
 
     def wait_until_ready(self, file_path):
-        """Checks file size repeatedly until it stops growing (meaning the copy is finished)."""
         historical_size = -1
         while True:
             try:
+                if not file_path.exists():
+                    return
                 current_size = file_path.stat().st_size
-                # If size hasn't changed in 1 second and is greater than 0, it is ready
                 if current_size == historical_size and current_size > 0:
                     break
                 historical_size = current_size
-                time.sleep(1)
+                time.sleep(0.5)
             except Exception:
-                
-                time.sleep(1)
+                time.sleep(0.5)
 
 def start_watchdog():
-    DATA_DIR.mkdir(exist_ok=True)
-    print(f"🚀 [NOVA WATCHDOG] Online. Actively monitoring {DATA_DIR.name}/ for instantaneous ingestion...")
+    PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"🚀 [NOVA WATCHDOG] Online. Recursively monitoring zero-trust landing zones...")
+    print("📡 Listening for payloads: TELEMETRY | ACCOUNTING | HR | SECURITY | IT")
+    print("--- Press Ctrl+C to terminate ---")
     
-    event_handler = TelemetryHandler()
+    event_handler = EnterpriseLandingZoneHandler()
     observer = Observer()
-    observer.schedule(event_handler, str(DATA_DIR), recursive=False)
+    # recursive=True automatically watches all department subfolders inside /payloads/
+    observer.schedule(event_handler, str(PAYLOAD_DIR), recursive=True)
     observer.start()
     
     try:
         while True:
-            time.sleep(1) # Keeps the main thread alive while Watchdog runs in the background
+            time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()
-        print("\n[NOVA WATCHDOG] Offline. Automated ingestion halted.")
+        print("\n[NOVA WATCHDOG] Offline.")
     observer.join()
 
 if __name__ == "__main__":

@@ -1,96 +1,85 @@
-import csv
+import os
+import time
 import hmac
 import hashlib
-from datetime import datetime, timedelta
 from pathlib import Path
 import random
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / 'data'
-SIG_DIR = BASE_DIR / 'signatures'
+PAYLOAD_DIR = BASE_DIR / "landing_zone" / "payloads"
+SIG_DIR = BASE_DIR / "landing_zone" / "signatures"
 
-HMAC_SECRET = b"nova_industrial_secure_key_2026"
+# Added security and it departments
+DEPARTMENTS = ["Telemetry", "Accounting", "Human-Resources", "Security", "IT"]
 
-def secure_and_save(file_path, csv_content):
-    """Writes the CSV and generates the isolated HMAC sidecar."""
-    with open(file_path, mode='w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerows(csv_content)
-        
+PIPELINE_SECRET_KEY = b"nova_k101_zero_trust_key_9982"
+
+def setup_directories():
+    for dept in DEPARTMENTS:
+        (PAYLOAD_DIR / dept).mkdir(parents=True, exist_ok=True)
+        (SIG_DIR / dept).mkdir(parents=True, exist_ok=True)
+
+def generate_hmac_signature(file_path):
     with open(file_path, 'rb') as f:
         file_bytes = f.read()
-        
-    signature = hmac.new(HMAC_SECRET, file_bytes, hashlib.sha256).hexdigest()
-    sig_path = SIG_DIR / f'{file_path.name}.hmac'
-    
-    with open(sig_path, 'w') as sig_file:
-        sig_file.write(signature)
-        
-    print(f" [EDGE SIM] Written: {file_path.name} | Security Sidecar: {sig_path.name}")
+    return hmac.new(PIPELINE_SECRET_KEY, file_bytes, hashlib.sha256).hexdigest()
 
-def generate_messy_telemetry(num_rows=250):
-    """Generates K-101 telemetry with intentional data corruption for ETL transformation."""
-    DATA_DIR.mkdir(exist_ok=True)
-    SIG_DIR.mkdir(exist_ok=True)
+def spawn_data(dept, num_rows=50):
+    timestamp_base = int(time.time())
+    filename = f"{dept}_batch_{timestamp_base}.csv"
     
-    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = DATA_DIR / f'telemetry_k101_{timestamp_str}.csv'
+    payload_path = PAYLOAD_DIR / dept / filename
+    sig_path = SIG_DIR / dept / f"{filename}.sig"
     
-    csv_content = [['timestamp', 'asset_id', 'temperature_c', 'pressure_psi', 'vibration_mm_s', 'power_kw']]
-    current_time = datetime.now() - timedelta(minutes=num_rows)
-    
-    for i in range(num_rows):
-        temp = 85.0 + random.uniform(-0.8, 0.8)
-        pressure = 120.0 + random.uniform(-1.5, 1.5)
-        vibration = 4.2 + random.uniform(-0.2, 0.2)
-        power = 450.0 + random.uniform(-3.0, 3.0)
-        
-        # --- INJECTING DIRTY DATA FOR ETL SHOWCASE ---
-        # 1. Null values (Simulating sensor dropouts)
-        if random.random() < 0.05: temp = "" 
-        
-        # 2. String artifacts (Simulating bad firmware formatting)
-        if random.random() < 0.10: pressure = f"{round(pressure, 2)} PSI" 
-        else: pressure = round(pressure, 2)
-            
-        # 3. Extreme outliers (To be filtered out in SQL)
-        if random.random() < 0.02: vibration = 999.99 
-        
-        csv_content.append([
-            current_time.strftime('%Y-%m-%d %H:%M:%S'),
-            'K-101',
-            temp if temp == "" else round(temp, 2),
-            pressure,
-            round(vibration, 3),
-            round(power, 2)
-        ])
-        current_time += timedelta(minutes=1)
-        
-    secure_and_save(file_path, csv_content)
+    # 1. Generate Data into the file
+    with open(payload_path, "w", encoding="utf-8") as f:
+        if dept == "Telemetry":
+            f.write("timestamp,asset_id,temperature_c,vibration_mm_s\n")
+            for i in range(num_rows):
+                # Increment time by 60 seconds per row for realistic sequential logs
+                row_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp_base + (i * 60)))
+                f.write(f"{row_time},K-101,{random.uniform(70, 95):.2f},{random.uniform(0.1, 5.0):.2f}\n")
+                
+        elif dept == "Accounting":
+            f.write("invoice_id,vendor,cost_center,amount,currency\n")
+            for i in range(num_rows):
+                f.write(f"INV-{timestamp_base}-{i},TechCorp,IT-OPS,{random.uniform(100, 5000):.2f},CAD\n")
+                
+        elif dept == "Human-Resources":
+            f.write("employee_id,department,action,timestamp\n")
+            for i in range(num_rows):
+                row_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp_base + (i * 3600)))
+                action = random.choice(["FACILITY_ENTRY", "FACILITY_EXIT", "SYSTEM_LOGIN"])
+                f.write(f"EMP-{random.randint(100,999)},HR,{action},{row_time}\n")
+                
+        elif dept == "Security":
+            f.write("event_time,ip_address,login_status,username\n")
+            for i in range(num_rows):
+                row_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp_base + (i * 15)))
+                status = random.choice(["SUCCESS", "FAILED", "LOCKED"])
+                user = random.choice(["sysadmin", "operator_1", "guest", "service_account"])
+                f.write(f"{row_time},192.168.1.{random.randint(10, 255)},{status},{user}\n")
+                
+        elif dept == "IT":
+            f.write("ticket_id,system,issue,status\n")
+            for i in range(num_rows):
+                issue = random.choice(["HIGH_CPU", "MEMORY_LEAK", "NETWORK_DROP", "DISK_FULL"])
+                status = random.choice(["OPEN", "IN_PROGRESS", "CLOSED", "RESOLVED"])
+                f.write(f"INC-{random.randint(1000, 9999)},SERVER-0{random.randint(1, 9)},{issue},{status}\n")
+        else:
+            raise ValueError(f"🚨 CRITICAL: No data generation logic found for department: '{dept}'")
 
-def generate_maintenance_logs():
-    """Generates a secondary data source from the reliability department."""
-    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = DATA_DIR / f'maintenance_k101_{timestamp_str}.csv'
-    
-    csv_content = [['log_id', 'asset_id', 'technician', 'action_taken', 'parts_replaced', 'logged_at']]
-    
-    technicians = ["john_operator", "sarah_engineer"]
-    actions = ["Replaced O-ring", "Calibrated thermal sensor", "Lubricated bearings", "Routine inspection"]
-    
-    for i in range(5):
-        csv_content.append([
-            f"MNT-{random.randint(1000, 9999)}",
-            'K-101',
-            random.choice(technicians),
-            random.choice(actions),
-            "Yes" if random.random() > 0.5 else "No",
-            (datetime.now() - timedelta(hours=random.randint(1, 48))).strftime('%Y-%m-%d %H:%M:%S')
-        ])
+    # 2. Cryptographically Sign the Payload
+    signature = generate_hmac_signature(payload_path)
+    with open(sig_path, "w", encoding="utf-8") as f:
+        f.write(signature)
         
-    secure_and_save(file_path, csv_content)
-
+    print(f"📡 [GENERATOR] Spawning {dept.upper()} data: {filename} ({num_rows} rows) (Signed & Secured)")
 if __name__ == "__main__":
-    print("Initializing Multi-Source Edge Simulation...")
-    generate_messy_telemetry(num_rows=250)
-    generate_maintenance_logs()
+    setup_directories()
+    print("--- Nova Cryptographic Generator Online ---")
+    
+    # Iterate through every department to guarantee generation for each
+    for dept in DEPARTMENTS:
+        spawn_data(dept)
+        time.sleep(1)

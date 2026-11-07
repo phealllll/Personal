@@ -1,128 +1,83 @@
+import duckdb
 import hmac
 import hashlib
 from pathlib import Path
-import duckdb
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "nova_warehouse.duckdb"
-DATA_DIR = BASE_DIR / 'data'
-SIG_DIR = BASE_DIR / 'signatures'
+SIG_DIR = BASE_DIR / "landing_zone" / "signatures"
+PIPELINE_SECRET_KEY = b"nova_k101_zero_trust_key_9982"
 
-HMAC_SECRET = b"nova_industrial_secure_key_2026"
+# Strict Automated Schema Contracts for all 5 departments
+DATA_CONTRACTS = {
+    "Telemetry": {"table": "bronze_telemetry", "columns": ["timestamp", "asset_id", "temperature_c", "vibration_mm_s"]},
+    "Accounting": {"table": "bronze_accounting", "columns": ["invoice_id", "vendor", "cost_center", "amount", "currency"]},
+    "Human-Resources": {"table": "bronze_hr", "columns": ["employee_id", "department", "action", "timestamp"]},
+    "Security": {"table": "bronze_security", "columns": ["event_time", "ip_address", "login_status", "username"]},
+    "IT": {"table": "bronze_it", "columns": ["ticket_id", "system", "issue", "status"]}
+}
 
-def setup_warehouse(con):
-    """Creates the target tables if they do not exist."""
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS k101_sensor_logs (
-            timestamp TIMESTAMP,
-            asset_id VARCHAR,
-            temperature_c DOUBLE,
-            pressure_psi DOUBLE,
-            vibration_mm_s DOUBLE,
-            power_kw DOUBLE,
-            is_anomalous INTEGER DEFAULT 0,
-            ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS maintenance_logs (
-            log_id VARCHAR,
-            asset_id VARCHAR,
-            technician VARCHAR,
-            action_taken VARCHAR,
-            parts_replaced VARCHAR,
-            logged_at TIMESTAMP,
-            ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS ingestion_audit_log (
-            batch_id VARCHAR,
-            status VARCHAR,
-            rows_processed INTEGER,
-            verified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-def verify_cryptography(file_path):
-    """Enforces zero-trust cross-vault verification."""
-    sig_path = SIG_DIR / f"{file_path.name}.hmac"
+def verify_file_integrity(payload_path, department):
+    """Compares the live file hash against the detached signature file."""
+    sig_path = SIG_DIR / department / f"{payload_path.name}.sig"
+    
     if not sig_path.exists():
-        raise FileNotFoundError(f"Missing cryptographic signature in /signatures for {file_path.name}")
+        raise FileNotFoundError(f"Missing cryptographic signature for {payload_path.name}")
         
-    with open(file_path, 'rb') as f:
+    with open(sig_path, 'r', encoding="utf-8") as f:
+        expected_hash = f.read().strip()
+        
+    with open(payload_path, 'rb') as f:
         file_bytes = f.read()
-        
-    with open(sig_path, 'r') as sig_file:
-        expected_sig = sig_file.read().strip()
-        
-    computed_sig = hmac.new(HMAC_SECRET, file_bytes, hashlib.sha256).hexdigest()
+            
+    actual_hash = hmac.new(PIPELINE_SECRET_KEY, file_bytes, hashlib.sha256).hexdigest()
     
-    if not hmac.compare_digest(computed_sig, expected_sig):
-        raise ValueError(f"HMAC cryptographic signature mismatch for {file_path.name}.")
-
-def run_etl_pipeline():
-    con = duckdb.connect(str(DB_PATH))
-    setup_warehouse(con)
+    if not hmac.compare_digest(expected_hash, actual_hash):
+        raise ValueError(f"CRITICAL: Hash mismatch! {payload_path.name} was tampered with or corrupted.")
     
-    csv_files = list(DATA_DIR.glob('*.csv'))
+    return True
+
+def process_secure_payload(file_path):
+    department = file_path.parent.name.lower()
     
-    for file in csv_files:
-        print(f"\nProcessing: {file.name}")
+    if department not in DATA_CONTRACTS:
+        print(f"⚠️ [SECURITY DROP] Unknown landing zone: {department}. File ignored.")
+        return
         
-        # 1. Idempotency Check
-        existing_audit = con.execute(
-            "SELECT status FROM ingestion_audit_log WHERE batch_id = ? AND status = 'SUCCESS'",
-            [file.name]
-        ).fetchone()
+    try:
+        # 1. Cryptographic Verification
+        verify_file_integrity(file_path, department)
+        print(f"🔒 [VERIFIED] Cryptographic signature valid for {file_path.name}")
         
-        if existing_audit:
-            print(f" [SKIPPED] Batch {file.name} already ingested.")
-            continue
+        # 2. Database Contract Execution
+        con = duckdb.connect(str(DB_PATH))
+        contract = DATA_CONTRACTS[department]
+        target_table = contract["table"]
+        
+        # Read headers to validate contract without loading data
+        file_str = str(file_path).replace('\\', '/')
+        headers = con.execute(f"SELECT * FROM read_csv_auto('{file_str}') LIMIT 0").df().columns.tolist()
+        
+        missing_columns = set(contract["columns"]) - set(headers)
+        if missing_columns:
+            raise ValueError(f"Schema violation. Missing columns: {missing_columns}")
             
-        try:
-            # 2. Security Check (HMAC Verification)
-            verify_cryptography(file)
-            print(" [PASS] Cryptographic signature verified.")
+        # 3. Dynamic Insertion
+        con.execute(f"""
+            CREATE TABLE IF NOT EXISTS {target_table} AS 
+            SELECT * FROM read_csv_auto('{file_str}') LIMIT 0;
             
-            file_str = str(file).replace('\\', '/')
-            
-            # 3. ETL Transformation & Loading
-            if file.name.startswith("telemetry_"):
-                # Use TRY_CAST to safely handle empty strings and dirty data without crashing
-                con.execute(f"""
-                    INSERT INTO k101_sensor_logs (timestamp, asset_id, temperature_c, pressure_psi, vibration_mm_s, power_kw)
-                    SELECT 
-                        TRY_CAST(timestamp AS TIMESTAMP),
-                        asset_id,
-                        COALESCE(TRY_CAST(temperature_c AS DOUBLE), 85.0), -- Safely catches '' and makes it 85.0
-                        TRY_CAST(REPLACE(CAST(pressure_psi AS VARCHAR), ' PSI', '') AS DOUBLE), 
-                        TRY_CAST(vibration_mm_s AS DOUBLE),
-                        TRY_CAST(power_kw AS DOUBLE)
-                    FROM read_csv_auto('{file_str}')
-                    WHERE TRY_CAST(vibration_mm_s AS DOUBLE) < 900.0 
-                """)
-                rows = con.execute("SELECT count(*) FROM read_csv_auto(?)", [file_str]).fetchone()[0]
-            elif file.name.startswith("maintenance_"):
-                con.execute(f"""
-                    INSERT INTO maintenance_logs (log_id, asset_id, technician, action_taken, parts_replaced, logged_at)
-                    SELECT * FROM read_csv_auto('{file_str}')
-                """)
-                rows = con.execute("SELECT count(*) FROM read_csv_auto(?)", [file_str]).fetchone()[0]
-                
-            else:
-                raise ValueError("Unknown file schema.")
-
-            con.execute("INSERT INTO ingestion_audit_log (batch_id, status, rows_processed) VALUES (?, ?, ?)", 
-                        [file.name, "SUCCESS", rows])
-            print(f" [SECURE ETL] Batch {file.name} cleaned and loaded ({rows} rows).")
-            
-        except Exception as e:
-            print(f" [ALERT] Pipeline failed for {file.name}. Reason: {e}")
-            con.execute("INSERT INTO ingestion_audit_log (batch_id, status, rows_processed) VALUES (?, ?, ?)", 
-                        [file.name, f"REJECTED: {str(e)}", 0])
-
-    con.close()
-
-if __name__ == "__main__":
-    run_etl_pipeline()
+            INSERT INTO {target_table}
+            SELECT *, '{file_path.name}' as batch_id, CURRENT_TIMESTAMP as ingested_at 
+            FROM read_csv_auto('{file_str}', all_varchar=1)
+        """)
+        
+        # Fetch exact row count loaded
+        rows_inserted = con.execute(f"SELECT count(*) FROM read_csv_auto('{file_str}', all_varchar=1)").fetchone()[0]
+        print(f"✅ [INGESTED] {file_path.name} securely loaded {rows_inserted} rows into {target_table}.")
+        
+    except Exception as e:
+        print(f"🚨 [QUARANTINE ALERT] Failed to process {file_path.name}. Reason: {e}")
+    finally:
+        if 'con' in locals():
+            con.close()
