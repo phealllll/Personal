@@ -4,6 +4,7 @@ import hmac
 import hashlib
 from pathlib import Path
 import random
+import shutil
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PAYLOAD_DIR = BASE_DIR / "landing_zone" / "payloads"
@@ -14,7 +15,28 @@ DEPARTMENTS = ["Telemetry", "Accounting", "Human-Resources", "Security", "IT"]
 
 PIPELINE_SECRET_KEY = b"nova_k101_zero_trust_key_9982"
 
+def clean_slate():
+    print("🧹 Sweeping old landing zones...")
+    
+    # Empty the contents of the payload directory without deleting the root folder
+    if PAYLOAD_DIR.exists():
+        for item in PAYLOAD_DIR.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+                
+    # Empty the contents of the signatures directory
+    if SIG_DIR.exists():
+        for item in SIG_DIR.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+
+
 def setup_directories():
+    clean_slate()
     for dept in DEPARTMENTS:
         (PAYLOAD_DIR / dept).mkdir(parents=True, exist_ok=True)
         (SIG_DIR / dept).mkdir(parents=True, exist_ok=True)

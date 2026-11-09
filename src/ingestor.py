@@ -8,15 +8,14 @@ DB_PATH = BASE_DIR / "nova_warehouse.duckdb"
 SIG_DIR = BASE_DIR / "landing_zone" / "signatures"
 PIPELINE_SECRET_KEY = b"nova_k101_zero_trust_key_9982"
 
-# Strict Automated Schema Contracts for all 5 departments
-DATA_CONTRACTS = {
-    "Telemetry": {"table": "bronze_telemetry", "columns": ["timestamp", "asset_id", "temperature_c", "vibration_mm_s"]},
-    "Accounting": {"table": "bronze_accounting", "columns": ["invoice_id", "vendor", "cost_center", "amount", "currency"]},
-    "Human-Resources": {"table": "bronze_hr", "columns": ["employee_id", "department", "action", "timestamp"]},
-    "Security": {"table": "bronze_security", "columns": ["event_time", "ip_address", "login_status", "username"]},
-    "IT": {"table": "bronze_it", "columns": ["ticket_id", "system", "issue", "status"]}
-}
 
+DATA_CONTRACTS = {
+    "telemetry": {"table": "bronze_telemetry", "columns": ["timestamp", "asset_id", "temperature_c", "vibration_mm_s"]},
+    "accounting": {"table": "bronze_accounting", "columns": ["invoice_id", "vendor", "cost_center", "amount", "currency"]},
+    "human-resources": {"table": "bronze_hr", "columns": ["employee_id", "department", "action", "timestamp"]},
+    "security": {"table": "bronze_security", "columns": ["event_time", "ip_address", "login_status", "username"]},
+    "it": {"table": "bronze_it", "columns": ["ticket_id", "system", "issue", "status"]}
+}
 def verify_file_integrity(payload_path, department):
     """Compares the live file hash against the detached signature file."""
     sig_path = SIG_DIR / department / f"{payload_path.name}.sig"
@@ -36,12 +35,13 @@ def verify_file_integrity(payload_path, department):
         raise ValueError(f"CRITICAL: Hash mismatch! {payload_path.name} was tampered with or corrupted.")
     
     return True
-
 def process_secure_payload(file_path):
     department = file_path.parent.name.lower()
     
     if department not in DATA_CONTRACTS:
-        print(f"⚠️ [SECURITY DROP] Unknown landing zone: {department}. File ignored.")
+        # This will reveal hidden spaces and show EXACTLY what keys are loaded in memory
+        print(f"⚠️ [SECURITY DROP] Rejected: '{department}'")
+        print(f"   -> Allowed zones in memory: {list(DATA_CONTRACTS.keys())}")
         return
         
     try:
@@ -61,15 +61,15 @@ def process_secure_payload(file_path):
         missing_columns = set(contract["columns"]) - set(headers)
         if missing_columns:
             raise ValueError(f"Schema violation. Missing columns: {missing_columns}")
-            
-        # 3. Dynamic Insertion
+      
         con.execute(f"""
             CREATE TABLE IF NOT EXISTS {target_table} AS 
-            SELECT * FROM read_csv_auto('{file_str}') LIMIT 0;
+            SELECT *, 'placeholder' as batch_id, CURRENT_TIMESTAMP as ingested_at 
+            FROM read_csv_auto('{file_str}') LIMIT 0;
             
             INSERT INTO {target_table}
             SELECT *, '{file_path.name}' as batch_id, CURRENT_TIMESTAMP as ingested_at 
-            FROM read_csv_auto('{file_str}', all_varchar=1)
+            FROM read_csv_auto('{file_str}', all_varchar=1);
         """)
         
         # Fetch exact row count loaded

@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nova | Enterprise Zero-Trust Pipeline</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --glass-bg: rgba(20, 25, 35, 0.6);
+            --glass-border: rgba(0, 243, 255, 0.2);
+            --neon-accent: #00f3ff;
+            --neon-error: #ff3366;
+            --neon-glow: 0 0 10px rgba(0, 243, 255, 0.5);
+            --text-main: #e2e8f0;
+            --text-muted: #94a3b8;
+        }
+
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: radial-gradient(circle at top right, #1a233a, var(--bg-color)); color: var(--text-main); margin: 0; padding: 0; min-height: 100vh; }
+        .hidden { display: none !important; }
+
+        /* Auth Overlay */
+        #auth-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(11, 15, 25, 0.95); z-index: 1000; display: flex; justify-content: center; align-items: center; }
+        .auth-box { background: var(--glass-bg); backdrop-filter: blur(15px); border: 1px solid var(--glass-border); padding: 40px; border-radius: 15px; width: 350px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+        .auth-box h2 { text-align: center; color: var(--neon-accent); margin-top: 0; text-shadow: var(--neon-glow); }
+        .auth-input { width: 100%; padding: 12px; margin: 10px 0; background: rgba(0,0,0,0.3); border: 1px solid #334155; color: white; border-radius: 5px; box-sizing: border-box; }
+        .auth-input:focus { border-color: var(--neon-accent); outline: none; }
+        .auth-btn { width: 100%; padding: 12px; margin-top: 15px; background: rgba(0, 243, 255, 0.1); color: var(--neon-accent); border: 1px solid var(--neon-accent); border-radius: 5px; cursor: pointer; font-weight: bold; text-transform: uppercase; transition: 0.3s; }
+        .auth-btn:hover { background: var(--neon-accent); color: black; box-shadow: var(--neon-glow); }
+        .auth-switch { text-align: center; font-size: 0.85rem; color: var(--text-muted); margin-top: 15px; cursor: pointer; }
+        .auth-switch:hover { color: var(--text-main); text-decoration: underline; }
+        .alert-box { padding: 10px; margin-bottom: 15px; border-radius: 5px; font-size: 0.9rem; text-align: center; }
+        .alert-error { background: rgba(255, 51, 102, 0.1); border: 1px solid var(--neon-error); color: var(--neon-error); }
+        .alert-success { background: rgba(0, 243, 255, 0.1); border: 1px solid var(--neon-accent); color: var(--neon-accent); }
+
+        /* Main App Layout */
+        header { text-align: center; padding: 30px 20px 10px; text-transform: uppercase; letter-spacing: 2px; position: relative; }
+        header h1 { color: var(--neon-accent); text-shadow: var(--neon-glow); margin: 0; font-size: 2.2rem; }
+        .user-badge { position: absolute; top: 20px; right: 20px; background: rgba(0,0,0,0.3); border: 1px solid var(--glass-border); padding: 8px 15px; border-radius: 20px; font-size: 0.85rem; }
+        .logout-btn { color: var(--neon-error); cursor: pointer; margin-left: 10px; font-weight: bold; }
+        
+        nav { display: flex; justify-content: center; gap: 20px; padding: 20px; border-bottom: 1px solid var(--glass-border); margin-bottom: 30px; }
+        button.nav-btn { background: var(--glass-bg); backdrop-filter: blur(10px); color: var(--text-main); border: 1px solid var(--glass-border); padding: 12px 25px; border-radius: 8px; cursor: pointer; font-weight: 600; transition: all 0.3s ease; text-transform: uppercase; letter-spacing: 1px; }
+        button.nav-btn:hover, button.nav-btn.active { background: rgba(0, 243, 255, 0.1); border-color: var(--neon-accent); color: var(--neon-accent); box-shadow: var(--neon-glow); }
+        
+        .container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
+        .dept-nav { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 25px; justify-content: center; }
+        .dept-btn { background: transparent; color: var(--text-muted); border: 1px solid #334155; padding: 8px 16px; border-radius: 20px; cursor: pointer; transition: 0.2s; }
+        .dept-btn:hover, .dept-btn.active { border-color: var(--neon-accent); color: var(--neon-accent); }
+        .glass-panel { background: var(--glass-bg); backdrop-filter: blur(12px); border: 1px solid var(--glass-border); border-radius: 15px; padding: 25px; margin-bottom: 30px; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3); }
+        .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 25px; }
+        .chart-container { position: relative; height: 350px; width: 100%; }
+        
+        .table-wrapper { overflow-x: auto; max-height: 400px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        th { background: rgba(0, 0, 0, 0.3); color: var(--neon-accent); position: sticky; top: 0; }
+        tr:hover { background: rgba(0, 243, 255, 0.05); }
+        
+        .profile-header { display: flex; align-items: center; gap: 20px; border-bottom: 1px solid var(--glass-border); padding-bottom: 20px; margin-bottom: 20px; }
+        h2 { color: var(--neon-accent); margin-top: 0; }
+        h3 { color: #fff; }
+        p { line-height: 1.7; color: var(--text-muted); font-size: 1.05rem; }
+        .tag-pill { background: rgba(0, 243, 255, 0.1); color: var(--neon-accent); padding: 5px 12px; border-radius: 15px; font-size: 0.85rem; border: 1px solid var(--neon-accent); display: inline-block; margin: 5px 5px 0 0; }
+        
+        .error-block { padding: 40px; text-align: center; border: 1px solid var(--neon-error); border-radius: 10px; background: rgba(255,51,102,0.05); }
+        .error-block h2 { color: var(--neon-error); text-shadow: 0 0 10px rgba(255,51,102,0.5); }
+    </style>
+</head>
+<body>
+
+    <!-- IAM SECURITY GATEWAY -->
+    <div id="auth-overlay">
+        <div class="auth-box">
+            <h2>🛡️ IAM Gateway</h2>
+            <div id="auth-alert" class="alert-box hidden"></div>
+            
+            <!-- Login Form -->
+            <div id="login-form">
+                <input type="text" id="login-user" class="auth-input" placeholder="Username">
+                <input type="password" id="login-pass" class="auth-input" placeholder="Password">
+                <button class="auth-btn" onclick="authenticate()">Authenticate</button>
+                <div class="auth-switch" onclick="toggleAuthMode()">No account? Register here</div>
+            </div>
+
+            <!-- Register Form -->
+            <div id="register-form" class="hidden">
+                <input type="text" id="reg-user" class="auth-input" placeholder="Choose Username">
+                <input type="password" id="reg-pass" class="auth-input" placeholder="Choose Password">
+                <select id="reg-role" class="auth-input">
+                    <option value="SYSADMIN">SYSADMIN</option>
+                    <option value="OPERATOR">OPERATOR</option>
+                    <option value="FINANCE_CONTROLLER">FINANCE_CONTROLLER</option>
+                    <option value="HR_MANAGER">HR_MANAGER</option>
+                    <option value="CYBER_SECURITY_AUDITOR">CYBER_SECURITY_AUDITOR</option>
+                </select>
+                <button class="auth-btn" onclick="registerUser()">Create Account</button>
+                <div class="auth-switch" onclick="toggleAuthMode()">Back to Login</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MAIN APP -->
+    <div id="main-app" class="hidden">
+        <header>
+            <h1>Nova Data Hub</h1>
+            <div style="color: var(--text-muted); font-size: 0.9rem; margin-top: 10px;">Zero-Trust Industrial Pipeline</div>
+            <div class="user-badge">
+                <span id="display-user"></span> | <span id="display-role" style="color: var(--neon-accent);"></span>
+                <span class="logout-btn" onclick="logout()">[LOGOUT]</span>
+            </div>
+        </header>
+
+        <nav>
+            <button class="nav-btn active" onclick="switchMainTab('dashboard', this)">Dashboard</button>
+            <button class="nav-btn" onclick="switchMainTab('about', this)">Architecture</button>
+            <button class="nav-btn" onclick="switchMainTab('profile', this)">Developer Profile</button>
+        </nav>
+
+        <div class="container">
+            <!-- DASHBOARD TAB -->
+            <div id="dashboard" class="tab-content">
+                <div class="dept-nav">
+                    <button class="dept-btn active" onclick="loadDepartmentData('telemetry', this)">📈 Telemetry</button>
+                    <button class="dept-btn" onclick="loadDepartmentData('accounting', this)">💰 Accounting</button>
+                    <button class="dept-btn" onclick="loadDepartmentData('human-resources', this)">👥 HR</button>
+                    <button class="dept-btn" onclick="loadDepartmentData('security', this)">🛡️ Security</button>
+                    <button class="dept-btn" onclick="loadDepartmentData('it', this)">💻 IT Support</button>
+                </div>
+
+                <div id="loading-state" style="text-align: center; color: var(--neon-accent); padding: 50px;">
+                    Select a department vault to access records.
+                </div>
+
+                <div id="dashboard-content" class="hidden">
+                    <div class="dashboard-grid">
+                        <div class="glass-panel">
+                            <h3 id="chart-title">Department Analytics</h3>
+                            <div class="chart-container"><canvas id="novaChart"></canvas></div>
+                        </div>
+                        <div class="glass-panel">
+                            <h3>Raw Cryptographic Ledger</h3>
+                            <div class="table-wrapper" id="table-container"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div id="rbac-error-content" class="hidden error-block">
+                    <h2>🚫 ACCESS DENIED</h2>
+                    <p id="rbac-error-message"></p>
+                </div>
+            </div>
+
+            <!-- ARCHITECTURE TAB -->
+            <div id="about" class="tab-content hidden glass-panel">
+                <h2>System Architecture</h2>
+                <p>Nova is an enterprise-grade, event-driven data pipeline designed to secure industrial workflows.</p>
+                <ul>
+                    <li><strong style="color: var(--neon-accent)">Watchdog Daemon:</strong> Monitors multithreaded landing zones for incoming CSV payloads.</li>
+                    <li><strong style="color: var(--neon-accent)">HMAC-SHA256 Cryptography:</strong> Validates detached signature files against payload byte-streams.</li>
+                    <li><strong style="color: var(--neon-accent)">DuckDB Medallion Storage:</strong> Dynamically creates strictly typed data contracts in a local warehouse.</li>
+                    <li><strong style="color: var(--neon-accent)">FastAPI & RBAC:</strong> Serves queries via decoupled JSON endpoints protected by application-layer Role-Based Access Control.</li>
+                </ul>
+            </div>
+
+            <!-- PROFILE TAB -->
+            <div id="profile" class="tab-content hidden glass-panel">
+                <div class="profile-header">
+                    <div>
+                        <h2>Raphael Chukwudi Ani</h2>
+                        <div style="color: var(--text-main);">Red Deer, Alberta, Canada</div>
+                    </div>
+                </div>
+                <p>I am a software professional specializing in the intersection of <strong>Cybersecurity, SQL database architecture, and Python automation</strong>. With a BSc in Computer Science from Godfrey Okoye University and ongoing Post-Baccalaureate studies in AI & Data Analytics at Red Deer Polytechnic, I build resilient systems that protect data integrity from ingestion to visualization.</p>
+                <div style="margin-top: 20px;">
+                    <span class="tag-pill">Python</span><span class="tag-pill">SQL & DuckDB</span><span class="tag-pill">Cybersecurity</span><span class="tag-pill">FastAPI</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = "http://127.0.0.1:8000/api";
+        let activeSession = null;
+        let currentChart = null;
+
+        // --- AUTH LOGIC ---
+        function toggleAuthMode() {
+            document.getElementById('login-form').classList.toggle('hidden');
+            document.getElementById('register-form').classList.toggle('hidden');
+            hideAlert();
+        }
+
+        function showAlert(msg, isError = true) {
+            const alert = document.getElementById('auth-alert');
+            alert.className = `alert-box ${isError ? 'alert-error' : 'alert-success'}`;
+            alert.innerText = msg;
+        }
+        function hideAlert() { document.getElementById('auth-alert').className = 'alert-box hidden'; }
+
+        async function registerUser() {
+            const u = document.getElementById('reg-user').value;
+            const p = document.getElementById('reg-pass').value;
+            const r = document.getElementById('reg-role').value;
+            
+            if(!u || !p) return showAlert("Username and Password required");
+
+            try {
+                const res = await fetch(`${API_URL}/register`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: u, password: p, role: r })
+                });
+                const data = await res.json();
+                if(res.ok) {
+                    showAlert(data.message, false);
+                    setTimeout(toggleAuthMode, 1500);
+                } else showAlert(data.detail);
+            } catch (e) { showAlert("API Server Offline"); }
+        }
+
+        async function authenticate() {
+            const u = document.getElementById('login-user').value;
+            const p = document.getElementById('login-pass').value;
+            if(!u || !p) return showAlert("Credentials required");
+
+            try {
+                const res = await fetch(`${API_URL}/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: u, password: p })
+                });
+                const data = await res.json();
+                
+                if(res.ok) {
+                    activeSession = { username: data.username, role: data.role };
+                    document.getElementById('auth-overlay').classList.add('hidden');
+                    document.getElementById('main-app').classList.remove('hidden');
+                    document.getElementById('display-user').innerText = activeSession.username;
+                    document.getElementById('display-role').innerText = activeSession.role;
+                    loadDepartmentData('telemetry', document.querySelector('.dept-btn')); // Auto-load telemetry
+                } else showAlert("Invalid credentials");
+            } catch (e) { showAlert("API Server Offline. Ensure Uvicorn is running."); }
+        }
+
+        function logout() {
+            activeSession = null;
+            document.getElementById('main-app').classList.add('hidden');
+            document.getElementById('auth-overlay').classList.remove('hidden');
+            document.getElementById('login-user').value = '';
+            document.getElementById('login-pass').value = '';
+            hideAlert();
+            if(currentChart) currentChart.destroy();
+        }
+
+        // --- DASHBOARD LOGIC ---
+        function switchMainTab(tabId, btnElement) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+            document.getElementById(tabId).classList.remove('hidden');
+            document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
+            btnElement.classList.add('active');
+        }
+
+        async function loadDepartmentData(department, btnElement) {
+            if(!activeSession) return;
+            document.querySelectorAll('.dept-btn').forEach(btn => btn.classList.remove('active'));
+            if(btnElement) btnElement.classList.add('active');
+
+            const loading = document.getElementById('loading-state');
+            const content = document.getElementById('dashboard-content');
+            const errBlock = document.getElementById('rbac-error-content');
+            
+            loading.classList.remove('hidden');
+            loading.innerText = 'Establishing secure connection...';
+            content.classList.add('hidden');
+            errBlock.classList.add('hidden');
+
+            try {
+                // Pass active session role to API
+                const response = await fetch(`${API_URL}/data/${department}?role=${activeSession.role}`);
+                const data = await response.json();
+
+                if(response.status === 403) {
+                    loading.classList.add('hidden');
+                    errBlock.classList.remove('hidden');
+                    document.getElementById('rbac-error-message').innerText = data.detail;
+                    return;
+                }
+
+                if(response.status === 404 || !data.length) {
+                    loading.innerText = data.detail || `⚠️ No data found for ${department.toUpperCase()}.`;
+                    return;
+                }
+
+                loading.classList.add('hidden');
+                content.classList.remove('hidden');
+                renderTable(data);
+                renderChart(department, data);
+
+            } catch (err) {
+                loading.innerText = '❌ Connection Refused.';
+            }
+        }
+
+        function renderTable(data) {
+            let html = '<table><thead><tr>';
+            Object.keys(data[0]).forEach(key => html += `<th>${key.replace('_', ' ').toUpperCase()}</th>`);
+            html += '</tr></thead><tbody>';
+            data.forEach(row => {
+                html += '<tr>';
+                Object.values(row).forEach(val => {
+                    let displayVal = String(val);
+                    if (displayVal.length > 25) displayVal = displayVal.substring(0, 22) + '...';
+                    html += `<td>${displayVal}</td>`;
+                });
+                html += '</tr>';
+            });
+            html += '</tbody></table>';
+            document.getElementById('table-container').innerHTML = html;
+        }
+
+        function renderChart(department, data) {
+            const ctx = document.getElementById('novaChart').getContext('2d');
+            if (currentChart) currentChart.destroy();
+            Chart.defaults.color = '#94a3b8';
+            Chart.defaults.borderColor = 'rgba(255,255,255,0.05)';
+
+            let config = { options: { responsive: true, maintainAspectRatio: false } };
+
+            if (department === 'telemetry') {
+                document.getElementById('chart-title').innerText = "Asset Temperature Trends";
+                config.type = 'line';
+                config.data = {
+                    labels: data.map(d => new Date(d.timestamp).toLocaleTimeString()),
+                    datasets: [{ label: 'Temp (°C)', data: data.map(d => d.temperature_c), borderColor: '#00f3ff', backgroundColor: 'rgba(0, 243, 255, 0.1)', borderWidth: 2, fill: true, tension: 0.4 }]
+                };
+            } else if (department === 'accounting') {
+                document.getElementById('chart-title').innerText = "Expenses by Cost Center";
+                const agg = data.reduce((acc, curr) => { acc[curr.cost_center] = (acc[curr.cost_center] || 0) + parseFloat(curr.amount); return acc; }, {});
+                config.type = 'bar';
+                config.data = { labels: Object.keys(agg), datasets: [{ label: 'Total Spend', data: Object.values(agg), backgroundColor: '#00f3ff', borderRadius: 4 }] };
+            } else if (department === 'human-resources') {
+                document.getElementById('chart-title').innerText = "Facility Access Distribution";
+                const actions = data.reduce((acc, curr) => { acc[curr.action] = (acc[curr.action] || 0) + 1; return acc; }, {});
+                config.type = 'doughnut';
+                config.data = { labels: Object.keys(actions), datasets: [{ data: Object.values(actions), backgroundColor: ['#00f3ff', '#3b82f6', '#8b5cf6', '#ec4899'], borderWidth: 0 }] };
+            } else {
+                document.getElementById('chart-title').innerText = "System Event Frequency";
+                const keyColumn = department === 'security' ? 'login_status' : 'status';
+                const counts = data.reduce((acc, curr) => { const val = curr[keyColumn] || 'Unknown'; acc[val] = (acc[val] || 0) + 1; return acc; }, {});
+                config.type = 'bar';
+                config.data = { labels: Object.keys(counts), datasets: [{ label: 'Event Count', data: Object.values(counts), backgroundColor: '#8b5cf6', borderRadius: 4 }] };
+            }
+            currentChart = new Chart(ctx, config);
+        }
+    </script>
+</body>
+</html>
