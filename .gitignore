@@ -4,7 +4,7 @@ __pycache__/
 .env
 
 # Data and local databases
-data/
+landing_page/
 *.csv
 *.parquet
 *.duckdb
