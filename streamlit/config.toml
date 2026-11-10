@@ -1,0 +1,6 @@
+[theme]
+primaryColor = "#00f3ff"          # Neon cyan accent
+backgroundColor = "#0f172a"       # Sleek deep slate (cleaner than pure black)
+secondaryBackgroundColor = "#1e293b"# Card / Sidebar background
+textColor = "#f8fafc"             # Crisp high-contrast white text
+font = "sans serif"
