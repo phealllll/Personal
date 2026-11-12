@@ -4,6 +4,7 @@ import pandas as pd
 from pathlib import Path
 import hashlib
 import secrets
+import uuid
 
 # --- Configuration & Styling ---
 st.set_page_config(page_title="Nova Enterprise Hub", layout="wide", page_icon="⚙️")
@@ -27,7 +28,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- Database IAM Helper Functions ---
+# --- Database IAM & Security Helper Functions ---
 def setup_iam_table(con):
     con.execute("""
         CREATE TABLE IF NOT EXISTS iam_users (
@@ -39,16 +40,42 @@ def setup_iam_table(con):
         )
     """)
 
+def setup_advanced_security_tables(con):
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS audit_ledger (
+            event_id VARCHAR, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            username VARCHAR, role VARCHAR, action_performed VARCHAR, query_hash VARCHAR
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS security_anomalies (
+            anomaly_id VARCHAR, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            department VARCHAR, severity VARCHAR, description VARCHAR
+        )
+    """)
+
+def log_audit_event(con, username, role, action, query_str=""):
+    event_id = str(uuid.uuid4())
+    query_hash = hashlib.sha256(f"{username}:{role}:{action}:{query_str}".encode()).hexdigest()
+    con.execute(
+        "INSERT INTO audit_ledger (event_id, username, role, action_performed, query_hash) VALUES (?, ?, ?, ?, ?)",
+        [event_id, username, role, action, query_hash]
+    )  
+
 def authenticate_user(username, password):
     con = duckdb.connect(str(DB_PATH), read_only=False)
     try:
         setup_iam_table(con)
+        setup_advanced_security_tables(con) # Initialize security tables on boot
+        
         user_record = con.execute("SELECT role, salt, password_hash FROM iam_users WHERE username = ?", [username]).fetchone()
         
         if user_record:
             db_role, db_salt, db_hash = user_record
             computed_hash = hashlib.sha256((db_salt + password).encode()).hexdigest()
             if computed_hash == db_hash:
+                # Log the successful login event
+                log_audit_event(con, username, db_role, "Authentication Successful", "LOGIN")
                 return db_role
         return None
     finally:
@@ -58,6 +85,8 @@ def register_user_in_db(username, password, role):
     con = duckdb.connect(str(DB_PATH), read_only=False)
     try:
         setup_iam_table(con)
+        setup_advanced_security_tables(con)
+        
         salt = secrets.token_hex(16)
         password_hash = hashlib.sha256((salt + password).encode()).hexdigest()
         
@@ -121,43 +150,62 @@ if st.sidebar.button("Log Out", use_container_width=True):
 st.title("⚙️ Nova Industrial Telemetry & Security Hub")
 st.divider()
 
-con = duckdb.connect(str(DB_PATH), read_only=True)
+# Changed to read_only=False so the Audit Logger can write to the database during dashboard navigation
+con = duckdb.connect(str(DB_PATH), read_only=False) 
 
-def load_secure_table(query, required_roles):
+def load_secure_table(query, required_roles, department_name):
     if st.session_state["role"] not in required_roles and st.session_state["role"] != "SYSADMIN":
         st.error(f"🚫 **RBAC SECURITY BLOCK:** Role `{st.session_state['role']}` is unauthorized.")
         return None
     try:
+        # User passed RBAC - Log the cryptographic audit event before yielding data
+        log_audit_event(con, st.session_state["username"], st.session_state["role"], f"Accessed {department_name} Vault", query)
         return con.execute(query).df()
     except Exception:
-        st.warning("Awaiting zero-trust ingestion for this vault...")
+        st.warning(f"Awaiting zero-trust ingestion for the {department_name} vault...")
         return None
 
-tabs = st.tabs(["📈 Telemetry", "💰 Accounting", "👥 HR", "🛡️ Security", "💻 IT Support"])
+# Added new tabs for the Auditor & Threat Intelligence
+tabs = st.tabs(["📈 Telemetry", "💰 Accounting", "👥 HR", "🛡️ IT Security", "💻 IT Support", "📜 Audit Ledger", "🚨 Threat Intelligence"])
 
 with tabs[0]:
-    df = load_secure_table("SELECT * FROM bronze_telemetry LIMIT 50", ["OPERATOR", "SYSADMIN"])
+    df = load_secure_table("SELECT * FROM bronze_telemetry ORDER BY ingested_at DESC LIMIT 50", ["OPERATOR", "SYSADMIN"], "Telemetry")
     if df is not None and not df.empty:
         st.dataframe(df, use_container_width=True)
         st.line_chart(df, x="timestamp", y="temperature_c")
 
 with tabs[1]:
-    df = load_secure_table("SELECT * FROM bronze_accounting LIMIT 50", ["FINANCE_CONTROLLER", "SYSADMIN"])
+    df = load_secure_table("SELECT * FROM bronze_accounting LIMIT 50", ["FINANCE_CONTROLLER", "SYSADMIN"], "Accounting")
     if df is not None and not df.empty:
         st.dataframe(df, use_container_width=True)
         st.bar_chart(df, x="cost_center", y="amount")
 
 with tabs[2]:
-    df = load_secure_table("SELECT * FROM bronze_hr LIMIT 50", ["HR_MANAGER", "SYSADMIN"])
+    df = load_secure_table("SELECT * FROM bronze_hr LIMIT 50", ["HR_MANAGER", "SYSADMIN"], "Human Resources")
     if df is not None and not df.empty:
         st.dataframe(df, use_container_width=True)
 
 with tabs[3]:
-    df = load_secure_table("SELECT * FROM bronze_security LIMIT 50", ["CYBER_SECURITY_AUDITOR", "SYSADMIN"])
+    df = load_secure_table("SELECT * FROM bronze_security LIMIT 50", ["CYBER_SECURITY_AUDITOR", "SYSADMIN"], "Security")
     if df is not None and not df.empty:
         st.dataframe(df, use_container_width=True)
 
 with tabs[4]:
-    df = load_secure_table("SELECT * FROM bronze_it LIMIT 50", ["CYBER_SECURITY_AUDITOR", "OPERATOR", "SYSADMIN"])
+    df = load_secure_table("SELECT * FROM bronze_it LIMIT 50", ["CYBER_SECURITY_AUDITOR", "OPERATOR", "SYSADMIN"], "IT Support")
+    if df is not None and not df.empty:
+        st.dataframe(df, use_container_width=True)
+
+# --- NEW: ADVANCED SECURITY DASHBOARDS ---
+with tabs[5]:
+    st.subheader("Immutable Audit Ledger")
+    st.markdown("Cryptographic tracking of all vault access attempts and system interactions.")
+    df = load_secure_table("SELECT event_id, timestamp, username, role, action_performed, query_hash FROM audit_ledger ORDER BY timestamp DESC LIMIT 100", ["CYBER_SECURITY_AUDITOR", "SYSADMIN"], "Audit Ledger")
+    if df is not None and not df.empty:
+        st.dataframe(df, use_container_width=True)
+
+with tabs[6]:
+    st.subheader("Automated Anomaly & Threat Detection")
+    st.markdown("Statistical outliers and security threats flagged by the Python Watchdog pipeline.")
+    df = load_secure_table("SELECT anomaly_id, timestamp, department, severity, description FROM security_anomalies ORDER BY timestamp DESC LIMIT 50", ["CYBER_SECURITY_AUDITOR", "SYSADMIN"], "Threat Intelligence")
     if df is not None and not df.empty:
         st.dataframe(df, use_container_width=True)
