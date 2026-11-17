@@ -48,11 +48,11 @@ def process_secure_payload(file_path):
         return
         
     try:
-        # 1. Cryptographic Verification
+        # Cryptographic Verification
         verify_file_integrity(file_path, department)
         print(f"🔒 [VERIFIED] Cryptographic signature valid for {file_path.name}")
         
-        # 2. Database Contract Execution
+        # Database Contract Execution
         con = duckdb.connect(str(DB_PATH))
         contract = DATA_CONTRACTS[department]
         target_table = contract["table"]
@@ -77,12 +77,12 @@ def process_secure_payload(file_path):
         rows_inserted = con.execute(f"SELECT count(*) FROM read_csv_auto('{file_str}', all_varchar=1)").fetchone()[0]
         print(f"✅ [INGESTED] {file_path.name} securely loaded {rows_inserted} rows into {target_table}.")
         
-        # 3. RUN ANOMALY DETECTOR AFTER INGESTION
+        #  RUN ANOMALY DETECTOR AFTER INGESTION
         if department == "telemetry":
             run_anomaly_detector(con)
             
     except Exception as e:
-        # 4. DEAD-LETTER QUEUE (Quarantine Bad Files)
+        #  DEAD-LETTER QUEUE (Quarantine Bad Files)
         print(f"🚨 [QUARANTINE ALERT] Failed to process {file_path.name}. Reason: {e}")
         
         # Physically move the tampered/bad file to a secure quarantine folder
