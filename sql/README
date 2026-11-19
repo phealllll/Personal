@@ -1,0 +1,97 @@
+# NovaWarehouse SQL Server Architecture
+
+This directory contains the T-SQL scripts used to provision, seed, and secure the `NovaWarehouse` relational database in Microsoft SQL Server (SSMS). The warehouse implements a zero-trust operational data model combining organizational hierarchy enforcement, sensor telemetry tracking, biometric facial-scan attestation, and an immutable audit ledger.
+
+---
+
+## Execution Order
+
+Run the scripts sequentially inside SQL Server Management Studio (SSMS) against your target SQL Server instance:
+
+1. `01_schema_nova.sql`
+   - Creates the `NovaWarehouse` database and separates objects into four logical schemas: `dim`, `fact`, `ops`, and `api`.
+   - Builds all 11 relational tables with primary keys, foreign key constraints, unique constraints, default UTC timestamps (`SYSUTCDATETIME()`), and domain-level `CHECK` constraints.
+2. `02_seed_nova.sql`
+   - Seeds the core organizational structure (`Operations`, `Finance`, `HR`, `IT`, `Security`), functional sub-units (`Telemetry`, `Audit & Ledger`, `Field Personnel`, `Core Systems`, `Access & CV Ops`), access roles (`Admin`, `Telemetry Manager`, `Auditor`, `Operative`, `Intern`), initial personnel reporting chains, and monitored physical/IT assets.
+3. `03_security_nova.sql`
+   - Provisions parameterized stored procedures under the `api` schema (`usp_insert_telemetry_reading`, `usp_record_operative_verification`, `usp_append_audit_log`).
+   - Configures least-privilege database roles (`nova_service_role`, `nova_auditor_role`, `nova_dashboard_reader`), blocks direct DML (`INSERT`, `UPDATE`, `DELETE`) on all base tables for application service accounts, and locks `ops.audit_ledger` as strictly append-only.
+
+---
+
+## Entity-Relationship & Cardinality Model
+
+`NovaWarehouse` follows a star-and-snowflake hybrid architecture where master reference dimensions (`dim`) govern personnel authority, asset ownership, and biometric baselines, while transactional fact tables (`fact`) capture telemetry, security alerts, and facial verification events.
+
+### 1. Organizational & Supervisory Relationships
+- `dim.department` (1) $\rightarrow$ (Many) `dim.unit`
+  - Foreign Key: `dim.unit.department_id` $\rightarrow$ `dim.department.department_id`
+  - Purpose: Models departmental sub-divisions, explicitly situating the `Telemetry` unit (`UNIT-TEL`) beneath `Operations` (`DEPT-OPS`) alongside specialized units for `Finance`, `HR`, `IT`, and `Security`.
+- `dim.department` (1) $\rightarrow$ (Many) `dim.employee`
+  - Foreign Key: `dim.employee.department_id` $\rightarrow$ `dim.department.department_id`
+  - Purpose: Assigns every employee to a primary administrative department (e.g., `Operative` and `Intern` personnel under `HR`, `Auditor` under `Finance`, `Telemetry Manager` under `Operations`).
+- `dim.unit` (1) $\rightarrow$ (Many) `dim.employee`
+  - Foreign Key: `dim.employee.unit_id` $\rightarrow$ `dim.unit.unit_id` (Nullable for root executive governance such as `nova_admin`).
+  - Purpose: Maps personnel to their active operational unit (`UNIT-TEL`, `UNIT-FLD`, `UNIT-AUD`, etc.).
+- `dim.role` (1) $\rightarrow$ (Many) `dim.employee`
+  - Foreign Key: `dim.employee.role_id` $\rightarrow$ `dim.role.role_id`
+  - Purpose: Enforces role-based authorization boundaries across the system (`Admin`, `Telemetry Manager`, `Auditor`, `Operative`, `Intern`).
+- Dual Self-Referencing Supervisory Chains on `dim.employee`:
+  - Administrative Reporting (`manager_id` $\rightarrow$ `employee_id`): Models standard line management (e.g., `nova_admin` overseeing `telemetry_mgr_1` and `finance_auditor`; `operative_1` mentoring `intern_1`).
+  - Cross-Departmental Telemetry Oversight (`telemetry_manager_id` $\rightarrow$ `employee_id`): Explicitly links the `Telemetry Manager` (`EMP-002` in `Operations / Telemetry`) to field `Operatives` (`EMP-003`, `EMP-004` in `HR / Field Personnel`), decoupling operational sensor oversight from HR line reporting.
+  - Integrity Guardrails: `CHK_employee_not_self_manager` and `CHK_employee_not_self_tm` prevent cyclical self-assignment.
+
+### 2. Biometric Enrollment & Asset Ownership Relationships
+- `dim.employee` (1) $\rightarrow$ (0..1) `dim.employee_biometric`
+  - Foreign Key & Uniqueness: `dim.employee_biometric.employee_id` $\rightarrow$ `dim.employee.employee_id` (`UNIQUE` constraint enforces strict 1-to-1 enrollment).
+  - Purpose: Stores the enrolled facial feature vector (`encoding_payload` as `VARBINARY(MAX)`), algorithm version (`encoding_version`), active status flag (`is_active`), and a 64-character SHA-256 integrity digest (`reference_sha256`). Only active `Operatives` with an enabled row in this table can pass the biometric verification gate.
+- `dim.department` (1) $\rightarrow$ (Many) `dim.asset` & `dim.employee` (1) $\rightarrow$ (Many) `dim.asset`
+  - Foreign Keys: `dim.asset.department_id` $\rightarrow$ `dim.department.department_id` and `dim.asset.assigned_operative_id` $\rightarrow$ `dim.employee.employee_id`.
+  - Purpose: Ties physical compressors, security gateways, and telemetry brokers to an owning department and a primary responsible operative, constrained by `CHK_asset_status` (`ACTIVE`, `MAINTENANCE`, `OFFLINE`, `DECOMMISSIONED`).
+
+### 3. Telemetry, Anomaly & Biometric Attestation Lifecycle
+- `dim.asset` (1) $\rightarrow$ (Many) `fact.telemetry_reading`
+  - Foreign Key: `fact.telemetry_reading.asset_id` $\rightarrow$ `dim.asset.asset_id`
+  - Purpose: Records high-precision sensor metrics (`temperature_c`, `vibration_mm_s` $\ge 0$) grouped by `source_batch`.
+- `dim.employee` (1) $\rightarrow$ (Many) `fact.telemetry_reading`
+  - Foreign Key: `fact.telemetry_reading.handled_by_operative_id` $\rightarrow$ `dim.employee.employee_id`
+  - Purpose: Establishes chain-of-custody accountability by recording the specific `Operative` who handled and ingested each telemetry batch.
+- `dim.asset` & `dim.department` (1) $\rightarrow$ (Many) `fact.security_anomaly`
+  - Foreign Keys: `asset_id` $\rightarrow$ `dim.asset.asset_id`, `department_id` $\rightarrow$ `dim.department.department_id`, and `verified_by_operative_id` $\rightarrow$ `dim.employee.employee_id`.
+  - Purpose: Tracks threshold breaches or security events (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`). Anomalies remain unresolved (`resolved_flag = 0`) until an authorized operative completes biometric verification.
+- Biometric Attestation Hub (`fact.operative_verification`):
+  - Foreign Keys:
+    - `employee_id` $\rightarrow$ `dim.employee.employee_id` (The operative scanned at the camera).
+    - `asset_id` $\rightarrow$ `dim.asset.asset_id` (The asset being attested).
+    - `anomaly_id` $\rightarrow$ `fact.security_anomaly.anomaly_id` (Optional link when clearing a specific security anomaly).
+  - Back-Reference to Telemetry (`fact.telemetry_reading.verification_id` $\rightarrow$ `fact.operative_verification.verification_id`):
+    - When telemetry readings first arrive, `verification_id` is `NULL` (unverified). Once the handling operative completes a facial scan (`auth_status = 'VERIFIED'`, `cv_confidence_score` between `0.0000` and `1.0000`, and 64-char `frame_sha256`), the database stamps that `verification_id` onto all matching unverified rows in `fact.telemetry_reading` for that `source_batch` and `asset_id`.
+
+### 4. Governance & Audit Relationships
+- `dim.employee` (0..1) $\rightarrow$ (Many) `ops.audit_ledger`
+  - Foreign Key: `ops.audit_ledger.employee_id` $\rightarrow$ `dim.employee.employee_id`
+  - Purpose: Links operational actions and SHA-256 query hashes (`query_hash`) back to the initiating employee identity while permitting system-level background events (`employee_id IS NULL`).
+- `ops.dq_validation_log` (Standalone Operational Log):
+  - Records automated pipeline validation checks (`PASS`, `WARN`, `FAIL`) by target table and rule name.
+
+---
+
+## Stored Procedure Write Interface (`api` Schema)
+
+Direct table writes are prohibited for application connections. All state changes flow through three atomic, parameterized stored procedures:
+
+| Procedure | Target Tables | Enforced Business & Security Logic |
+| :--- | :--- | :--- |
+| `api.usp_insert_telemetry_reading` | `fact.telemetry_reading` | Verifies that `@handled_by_operative_id` exists and holds the `Operative` role (`THROWS 50001` otherwise) before inserting sensor readings. |
+| `api.usp_record_operative_verification` | `fact.operative_verification`, `fact.telemetry_reading`, `fact.security_anomaly` | Executes inside an explicit transaction (`BEGIN TRAN` / `COMMIT` / `ROLLBACK`). Confirms the employee is an active `Operative` with an active profile in `dim.employee_biometric` (`THROWS 50002` otherwise). If `@auth_status = 'VERIFIED'`, automatically stamps `verification_id` onto matching batch telemetry rows and marks linked anomalies resolved. |
+| `api.usp_append_audit_log` | `ops.audit_ledger` | Appends immutable audit records containing actor metadata, action descriptions, and 64-character SHA-256 query digests. |
+
+---
+
+## Security & Zero-Trust Controls
+
+- Stored-Procedure-Only Write Surface: The application login (`nova_svc_login` / `nova_svc_user`) is assigned exclusively to `nova_service_role`, which has `EXECUTE` on `SCHEMA::api` and `SELECT` on `dim`/`fact`, while `INSERT`, `UPDATE`, and `DELETE` are explicitly denied across `dim`, `fact`, and `ops`.
+- SQL Injection Prevention: Python services communicate via `pyodbc` parameterized procedure calls (`{CALL api.usp_... (?, ?)}`), preventing string concatenation and ensuring malicious payloads cannot execute arbitrary DDL/DML even if application-layer validation is bypassed.
+- Immutable Audit Ledger: `UPDATE` and `DELETE` permissions on `ops.audit_ledger` are explicitly denied to `PUBLIC`, `nova_service_role`, `nova_auditor_role`, and `nova_dashboard_reader`.
+- Separation of Read Consumers: Visualization clients (such as Streamlit dashboards) connect under `nova_dashboard_reader` (`SELECT`-only with `EXECUTE` denied), while compliance reviewers use `nova_auditor_role`.
+- Biometric Privacy: Raw camera frames are never persisted in SQL Server; only mathematical embeddings (`dim.employee_biometric`) and cryptographic SHA-256 frame digests (`fact.operative_verification`) are stored.
