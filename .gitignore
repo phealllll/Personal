@@ -13,3 +13,5 @@ landing_page/
 images/
 *.jpg
 *.png
+
+models/
