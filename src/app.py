@@ -1,211 +1,242 @@
-import streamlit as st
-import duckdb
+import os
 import pandas as pd
-from pathlib import Path
-import hashlib
-import secrets
-import uuid
+import plotly.express as px
+import plotly.graph_objects as go
+import pyodbc
+import streamlit as st
+from dotenv import load_dotenv
 
-# --- Configuration & Styling ---
-st.set_page_config(page_title="Nova Enterprise Hub", layout="wide", page_icon="⚙️")
-BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = BASE_DIR / "nova_warehouse.duckdb"
 
-st.markdown("""
-    <style>
-    /* Custom Card Containers */
-    .stMetric, div[data-testid="stVerticalBlock"] > div:has(div.stDataFrame) {
-        background-color: rgba(30, 41, 59, 0.5);
-        border: 1px solid rgba(0, 243, 255, 0.2);
-        border-radius: 12px;
-        padding: 15px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+load_dotenv()
+
+st.set_page_config(
+    page_title="NovaWarehouse | Zero-Trust Telemetry & Biometric Ops",
+    layout="wide",
+)
+
+
+def get_readonly_connection() -> pyodbc.Connection:
+    server = os.getenv("NOVA_SQL_SERVER", "PHEAL")
+    database = os.getenv("NOVA_SQL_DB", "NovaWarehouse")
+    driver = os.getenv("NOVA_SQL_DRIVER", "{ODBC Driver 18 for SQL Server}")
+    username = os.getenv("NOVA_DASH_USER", "nova_dash_login")
+    password = os.getenv("NOVA_DASH_PASSWORD", "")
+
+    conn_str = (
+        f"DRIVER={driver};"
+        f"SERVER={server};"
+        f"DATABASE={database};"
+        f"UID={username};"
+        f"PWD={password};"
+        "Encrypt=yes;"
+        "TrustServerCertificate=yes;"
+    )
+    return pyodbc.connect(conn_str, autocommit=True)
+
+
+@st.cache_data(ttl=15)
+def load_dashboard_data() -> dict[str, pd.DataFrame]:
+    with get_readonly_connection() as conn:
+        principal_df = pd.read_sql(
+            "SELECT SYSTEM_USER AS sql_login, USER_NAME() AS db_user", conn
+        )
+        assets_df = pd.read_sql(
+            """
+            SELECT a.asset_id, a.asset_name, a.asset_type, d.department_name,
+                   a.assigned_operative_id, e.username AS operative_username, a.status
+            FROM dim.asset a
+            JOIN dim.department d ON a.department_id = d.department_id
+            LEFT JOIN dim.employee e ON a.assigned_operative_id = e.employee_id
+            """,
+            conn,
+        )
+        telemetry_df = pd.read_sql(
+            """
+            SELECT t.reading_id, t.asset_id, a.asset_name, t.recorded_at_utc,
+                   t.temperature_c, t.vibration_mm_s, t.source_batch,
+                   t.handled_by_operative_id, e.username AS operative_username,
+                   t.verification_id
+            FROM fact.telemetry_reading t
+            JOIN dim.asset a ON t.asset_id = a.asset_id
+            LEFT JOIN dim.employee e ON t.handled_by_operative_id = e.employee_id
+            ORDER BY t.recorded_at_utc ASC
+            """,
+            conn,
+        )
+        anomalies_df = pd.read_sql(
+            """
+            SELECT sa.anomaly_id, sa.asset_id, sa.severity, sa.description,
+                   sa.detected_at_utc, sa.verified_by_operative_id,
+                   e.username AS resolved_by, sa.resolved_flag
+            FROM fact.security_anomaly sa
+            LEFT JOIN dim.employee e ON sa.verified_by_operative_id = e.employee_id
+            ORDER BY sa.detected_at_utc DESC
+            """,
+            conn,
+        )
+        verifications_df = pd.read_sql(
+            """
+            SELECT v.verification_id, v.employee_id, e.username, v.asset_id,
+                   v.source_batch, v.anomaly_id, v.cv_confidence_score,
+                   v.auth_status, v.frame_sha256, v.verified_at_utc
+            FROM fact.operative_verification v
+            JOIN dim.employee e ON v.employee_id = e.employee_id
+            ORDER BY v.verified_at_utc DESC
+            """,
+            conn,
+        )
+        dq_df = pd.read_sql(
+            """
+            SELECT check_id, checked_at_utc, table_name, check_name, status, detail
+            FROM ops.dq_validation_log
+            ORDER BY checked_at_utc DESC
+            """,
+            conn,
+        )
+        audit_df = pd.read_sql(
+            """
+            SELECT event_id, event_timestamp_utc, employee_id, username,
+                   role_name, action_performed, query_hash
+            FROM ops.audit_ledger
+            ORDER BY event_timestamp_utc DESC
+            """,
+            conn,
+        )
+
+    return {
+        "principal": principal_df,
+        "assets": assets_df,
+        "telemetry": telemetry_df,
+        "anomalies": anomalies_df,
+        "verifications": verifications_df,
+        "dq": dq_df,
+        "audit": audit_df,
     }
-    /* Style headers */
-    h1, h2, h3 {
-        letter-spacing: 1px;
-    }
-    </style>
-""", unsafe_allow_html=True)
 
-# --- Database IAM & Security Helper Functions ---
-def setup_iam_table(con):
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS iam_users (
-            username VARCHAR UNIQUE,
-            role VARCHAR,
-            salt VARCHAR,
-            password_hash VARCHAR,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
 
-def setup_advanced_security_tables(con):
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS audit_ledger (
-            event_id VARCHAR, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            username VARCHAR, role VARCHAR, action_performed VARCHAR, query_hash VARCHAR
-        )
-    """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS security_anomalies (
-            anomaly_id VARCHAR, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            department VARCHAR, severity VARCHAR, description VARCHAR
-        )
-    """)
+st.title("NovaWarehouse Operations & Biometric Attestation")
 
-def log_audit_event(con, username, role, action, query_str=""):
-    event_id = str(uuid.uuid4())
-    query_hash = hashlib.sha256(f"{username}:{role}:{action}:{query_str}".encode()).hexdigest()
-    con.execute(
-        "INSERT INTO audit_ledger (event_id, username, role, action_performed, query_hash) VALUES (?, ?, ?, ?, ?)",
-        [event_id, username, role, action, query_hash]
-    )  
+if st.sidebar.button("Refresh Warehouse Data"):
+    st.cache_data.clear()
 
-def authenticate_user(username, password):
-    con = duckdb.connect(str(DB_PATH), read_only=False)
-    try:
-        setup_iam_table(con)
-        setup_advanced_security_tables(con) # Initialize security tables on boot
-        
-        user_record = con.execute("SELECT role, salt, password_hash FROM iam_users WHERE username = ?", [username]).fetchone()
-        
-        if user_record:
-            db_role, db_salt, db_hash = user_record
-            computed_hash = hashlib.sha256((db_salt + password).encode()).hexdigest()
-            if computed_hash == db_hash:
-                # Log the successful login event
-                log_audit_event(con, username, db_role, "Authentication Successful", "LOGIN")
-                return db_role
-        return None
-    finally:
-        con.close()
+data = load_dashboard_data()
+principal = data["principal"].iloc[0]
+st.sidebar.markdown("### Zero-Trust Session")
+st.sidebar.code(
+    f"Login: {principal['sql_login']}\nUser:  {principal['db_user']}\nMode:  READ-ONLY"
+)
 
-def register_user_in_db(username, password, role):
-    con = duckdb.connect(str(DB_PATH), read_only=False)
-    try:
-        setup_iam_table(con)
-        setup_advanced_security_tables(con)
-        
-        salt = secrets.token_hex(16)
-        password_hash = hashlib.sha256((salt + password).encode()).hexdigest()
-        
-        con.execute(
-            "INSERT INTO iam_users (username, role, salt, password_hash) VALUES (?, ?, ?, ?)",
-            [username, role, salt, password_hash]
-        )
-        return True, f"User '{username}' registered successfully!"
-    except Exception as e:
-        if "ConstraintException" in str(type(e)) or "already exists" in str(e):
-            return False, f"Username '{username}' is already taken."
-        return False, f"Registration error: {e}"
-    finally:
-        con.close()
+telemetry_df = data["telemetry"]
+anomalies_df = data["anomalies"]
+verifications_df = data["verifications"]
 
-# --- Session State ---
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
-    st.session_state["username"] = None
-    st.session_state["role"] = None
-
-# --- IAM GATEWAY UI ---
-if not st.session_state["authenticated"]:
-    st.markdown("<h2 style='text-align: center;'>🛡️ Nova IAM Security Gateway</h2>", unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
-        auth_mode = st.radio("Mode", ["🔑 Login", "📝 Register"], horizontal=True, label_visibility="collapsed")
-        
-        if auth_mode == "🔑 Login":
-            with st.form("login_form"):
-                username = st.text_input("Username")
-                password = st.text_input("Password", type="password")
-                if st.form_submit_button("Authenticate", use_container_width=True):
-                    role = authenticate_user(username, password)
-                    if role:
-                        st.session_state["authenticated"] = True
-                        st.session_state["username"] = username
-                        st.session_state["role"] = role
-                        st.rerun()
-                    else:
-                        st.error("Invalid credentials.")
-        else:
-            with st.form("register_form"):
-                new_user = st.text_input("Username")
-                new_pass = st.text_input("Password", type="password")
-                new_role = st.selectbox("Role", ["SYSADMIN", "OPERATOR", "FINANCE_CONTROLLER", "HR_MANAGER", "CYBER_SECURITY_AUDITOR"])
-                if st.form_submit_button("Register", use_container_width=True):
-                    success, msg = register_user_in_db(new_user.strip(), new_pass.strip(), new_role)
-                    if success: st.success(msg)
-                    else: st.error(msg)
+if telemetry_df.empty:
+    st.warning("No telemetry readings found in NovaWarehouse. Run src/ingestor.py first.")
     st.stop()
 
-# --- SECURE BACKEND DASHBOARD ---
-st.sidebar.markdown(f"**User:** `{st.session_state['username']}`")
-st.sidebar.markdown(f"**Role:** `{st.session_state['role']}`")
-if st.sidebar.button("Log Out", use_container_width=True):
-    st.session_state["authenticated"] = False
-    st.rerun()
+batches = sorted(telemetry_df["source_batch"].unique(), reverse=True)
+selected_batch = st.sidebar.selectbox("Select Telemetry Batch", batches)
+batch_df = telemetry_df[telemetry_df["source_batch"] == selected_batch].copy()
+batch_df["recorded_at_utc"] = pd.to_datetime(batch_df["recorded_at_utc"])
+batch_df["attestation_state"] = batch_df["verification_id"].apply(
+    lambda x: "VERIFIED" if pd.notna(x) else "UNVERIFIED"
+)
 
-st.title("⚙️ Nova Industrial Telemetry & Security Hub")
-st.divider()
+total_rows = len(batch_df)
+verified_rows = int(batch_df["verification_id"].notna().sum())
+open_anomalies = int((anomalies_df["resolved_flag"] == 0).sum()) if not anomalies_df.empty else 0
+latest_conf = (
+    float(verifications_df.iloc[0]["cv_confidence_score"])
+    if not verifications_df.empty
+    else 0.0
+)
 
-# Changed to read_only=False so the Audit Logger can write to the database during dashboard navigation
-con = duckdb.connect(str(DB_PATH), read_only=False) 
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Batch Telemetry Rows", f"{total_rows:,}")
+c2.metric("Biometrically Verified Rows", f"{verified_rows:,} / {total_rows:,}")
+c3.metric("Open Security Anomalies", open_anomalies)
+c4.metric("Latest CV Match Confidence", f"{latest_conf:.4f}")
 
-def load_secure_table(query, required_roles, department_name):
-    if st.session_state["role"] not in required_roles and st.session_state["role"] != "SYSADMIN":
-        st.error(f"🚫 **RBAC SECURITY BLOCK:** Role `{st.session_state['role']}` is unauthorized.")
-        return None
-    try:
-        # User passed RBAC - Log the cryptographic audit event before yielding data
-        log_audit_event(con, st.session_state["username"], st.session_state["role"], f"Accessed {department_name} Vault", query)
-        return con.execute(query).df()
-    except Exception:
-        st.warning(f"Awaiting zero-trust ingestion for the {department_name} vault...")
-        return None
+tab_telemetry, tab_biometrics, tab_audit = st.tabs(
+    ["Telemetry & Thresholds", "Biometric Gate & Anomalies", "DQ & Immutable Audit Ledger"]
+)
 
-# Added new tabs for the Auditor & Threat Intelligence
-tabs = st.tabs(["📈 Telemetry", "💰 Accounting", "👥 HR", "🛡️ IT Security", "💻 IT Support", "📜 Audit Ledger", "🚨 Threat Intelligence"])
+with tab_telemetry:
+    col_temp, col_vib = st.columns(2)
 
-with tabs[0]:
-    df = load_secure_table("SELECT * FROM bronze_telemetry ORDER BY ingested_at DESC LIMIT 50", ["OPERATOR", "SYSADMIN"], "Telemetry")
-    if df is not None and not df.empty:
-        st.dataframe(df, use_container_width=True)
-        st.line_chart(df, x="timestamp", y="temperature_c")
+    with col_temp:
+        fig_temp = px.line(
+            batch_df,
+            x="recorded_at_utc",
+            y="temperature_c",
+            title=f"Compressor Temperature (°C) — {selected_batch}",
+            labels={"recorded_at_utc": "Timestamp (UTC)", "temperature_c": "Temperature (°C)"},
+        )
+        fig_temp.add_hline(
+            y=90.0,
+            line_dash="dash",
+            line_color="red",
+            annotation_text="Alert Threshold (90.0 °C)",
+        )
+        st.plotly_chart(fig_temp, use_container_width=True)
 
-with tabs[1]:
-    df = load_secure_table("SELECT * FROM bronze_accounting LIMIT 50", ["FINANCE_CONTROLLER", "SYSADMIN"], "Accounting")
-    if df is not None and not df.empty:
-        st.dataframe(df, use_container_width=True)
-        st.bar_chart(df, x="cost_center", y="amount")
+    with col_vib:
+        fig_vib = px.line(
+            batch_df,
+            x="recorded_at_utc",
+            y="vibration_mm_s",
+            title=f"Mechanical Vibration (mm/s) — {selected_batch}",
+            labels={"recorded_at_utc": "Timestamp (UTC)", "vibration_mm_s": "Vibration (mm/s)"},
+        )
+        fig_vib.add_hline(
+            y=7.0,
+            line_dash="dash",
+            line_color="red",
+            annotation_text="Alert Threshold (7.0 mm/s)",
+        )
+        st.plotly_chart(fig_vib, use_container_width=True)
 
-with tabs[2]:
-    df = load_secure_table("SELECT * FROM bronze_hr LIMIT 50", ["HR_MANAGER", "SYSADMIN"], "Human Resources")
-    if df is not None and not df.empty:
-        st.dataframe(df, use_container_width=True)
+    st.subheader("Threshold Breach Readings in Selected Batch")
+    breach_df = batch_df[(batch_df["temperature_c"] > 90.0) | (batch_df["vibration_mm_s"] > 7.0)]
+    st.dataframe(breach_df, use_container_width=True, hide_index=True)
 
-with tabs[3]:
-    df = load_secure_table("SELECT * FROM bronze_security LIMIT 50", ["CYBER_SECURITY_AUDITOR", "SYSADMIN"], "Security")
-    if df is not None and not df.empty:
-        st.dataframe(df, use_container_width=True)
+    st.subheader("Monitored Infrastructure Assets")
+    st.dataframe(data["assets"], use_container_width=True, hide_index=True)
 
-with tabs[4]:
-    df = load_secure_table("SELECT * FROM bronze_it LIMIT 50", ["CYBER_SECURITY_AUDITOR", "OPERATOR", "SYSADMIN"], "IT Support")
-    if df is not None and not df.empty:
-        st.dataframe(df, use_container_width=True)
+with tab_biometrics:
+    st.subheader("Operative Facial Verification Gate History")
+    if not verifications_df.empty:
+        fig_conf = go.Figure(
+            data=[
+                go.Bar(
+                    x=verifications_df["verification_id"],
+                    y=verifications_df["cv_confidence_score"],
+                    text=verifications_df["auth_status"],
+                    textposition="auto",
+                )
+            ]
+        )
+        fig_conf.add_hline(
+            y=0.363,
+            line_dash="dash",
+            line_color="green",
+            annotation_text="SFace Cosine Threshold (0.363)",
+        )
+        fig_conf.update_layout(
+            title="Biometric Cosine Similarity Scores by Scan Event",
+            xaxis_title="Verification ID",
+            yaxis_title="Cosine Confidence Score",
+            yaxis=dict(range=[0, 1]),
+        )
+        st.plotly_chart(fig_conf, use_container_width=True)
+        st.dataframe(verifications_df, use_container_width=True, hide_index=True)
 
-# --- NEW: ADVANCED SECURITY DASHBOARDS ---
-with tabs[5]:
-    st.subheader("Immutable Audit Ledger")
-    st.markdown("Cryptographic tracking of all vault access attempts and system interactions.")
-    df = load_secure_table("SELECT event_id, timestamp, username, role, action_performed, query_hash FROM audit_ledger ORDER BY timestamp DESC LIMIT 100", ["CYBER_SECURITY_AUDITOR", "SYSADMIN"], "Audit Ledger")
-    if df is not None and not df.empty:
-        st.dataframe(df, use_container_width=True)
+    st.subheader("Security Anomalies & Operative Sign-Off")
+    st.dataframe(anomalies_df, use_container_width=True, hide_index=True)
 
-with tabs[6]:
-    st.subheader("Automated Anomaly & Threat Detection")
-    st.markdown("Statistical outliers and security threats flagged by the Python Watchdog pipeline.")
-    df = load_secure_table("SELECT anomaly_id, timestamp, department, severity, description FROM security_anomalies ORDER BY timestamp DESC LIMIT 50", ["CYBER_SECURITY_AUDITOR", "SYSADMIN"], "Threat Intelligence")
-    if df is not None and not df.empty:
-        st.dataframe(df, use_container_width=True)
+with tab_audit:
+    st.subheader("Automated Data Quality & SHA-256 Manifest Checks")
+    st.dataframe(data["dq"], use_container_width=True, hide_index=True)
+
+    st.subheader("Immutable Append-Only Audit Ledger (ops.audit_ledger)")
+    st.dataframe(data["audit"], use_container_width=True, hide_index=True)

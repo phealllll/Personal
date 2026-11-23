@@ -1,22 +1,24 @@
 import hashlib
-import os
 import urllib.request
 import uuid
 from pathlib import Path
 from typing import Optional
 import cv2
+import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
 import numpy as np
 import pyodbc
 from db_connection import get_sql_connection
 
 
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
-YUNET_PATH = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
+BLAZE_PATH = MODELS_DIR / "blaze_face_short_range.tflite"
 SFACE_PATH = MODELS_DIR / "face_recognition_sface_2021dec.onnx"
 
-YUNET_URL = (
-    "https://github.com/opencv/opencv_zoo/raw/main/models/"
-    "face_detection_yunet/face_detection_yunet_2023mar.onnx"
+BLAZE_URL = (
+    "https://storage.googleapis.com/mediapipe-models/face_detector/"
+    "blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
 )
 SFACE_URL = (
     "https://github.com/opencv/opencv_zoo/raw/main/models/"
@@ -28,9 +30,9 @@ COSINE_THRESHOLD = 0.363
 
 def ensure_models() -> None:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    if not YUNET_PATH.exists():
-        print("Downloading YuNet face detection model...")
-        urllib.request.urlretrieve(YUNET_URL, YUNET_PATH)
+    if not BLAZE_PATH.exists():
+        print("Downloading BlazeFace detection model...")
+        urllib.request.urlretrieve(BLAZE_URL, BLAZE_PATH)
     if not SFACE_PATH.exists():
         print("Downloading SFace recognition model...")
         urllib.request.urlretrieve(SFACE_URL, SFACE_PATH)
@@ -71,18 +73,37 @@ def capture_frame(image_path: Optional[str] = None) -> np.ndarray:
 def extract_face_embedding(frame: np.ndarray) -> tuple[np.ndarray, str]:
     ensure_models()
     h, w = frame.shape[:2]
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
-    detector = cv2.FaceDetectorYN.create(
-        str(YUNET_PATH), "", (w, h), score_threshold=0.7, nms_threshold=0.3
+    base_options = mp_python.BaseOptions(model_asset_path=str(BLAZE_PATH))
+    options = mp_vision.FaceDetectorOptions(
+        base_options=base_options,
+        min_detection_confidence=0.6,
     )
-    _, faces = detector.detect(frame)
-    if faces is None or len(faces) == 0:
-        raise ValueError("No face detected in frame.")
 
-    primary_face = max(faces, key=lambda f: f[2] * f[3])
+    with mp_vision.FaceDetector.create_from_options(options) as detector:
+        result = detector.detect(mp_image)
+
+    if not result.detections:
+        raise ValueError("No face detected in frame. Ensure good lighting and face the camera.")
+
+    best_det = max(
+        result.detections,
+        key=lambda d: d.bounding_box.width * d.bounding_box.height,
+    )
+    bbox = best_det.bounding_box
+    x1 = max(0, bbox.origin_x)
+    y1 = max(0, bbox.origin_y)
+    x2 = min(w, bbox.origin_x + bbox.width)
+    y2 = min(h, bbox.origin_y + bbox.height)
+
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError("Invalid facial bounding box detected.")
+
+    face_crop = cv2.resize(frame[y1:y2, x1:x2], (112, 112))
     recognizer = cv2.FaceRecognizerSF.create(str(SFACE_PATH), "")
-    aligned_face = recognizer.alignCrop(frame, primary_face)
-    feature = recognizer.feature(aligned_face).astype(np.float32).flatten()
+    feature = recognizer.feature(face_crop).astype(np.float32).flatten()
 
     _, encoded_img = cv2.imencode(".png", frame)
     frame_sha256 = hashlib.sha256(encoded_img.tobytes()).hexdigest()
