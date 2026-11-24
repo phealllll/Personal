@@ -40,6 +40,25 @@ def load_dashboard_data() -> dict[str, pd.DataFrame]:
         principal_df = pd.read_sql(
             "SELECT SYSTEM_USER AS sql_login, USER_NAME() AS db_user", conn
         )
+        enrolled_employees_df = pd.read_sql(
+            """
+            SELECT
+                e.employee_id,
+                e.username,
+                r.role_name,
+                d.department_name,
+                b.biometric_id,
+                b.model_version,
+                b.enrolled_at_utc,
+                CASE WHEN b.biometric_id IS NOT NULL THEN 'ENROLLED' ELSE 'UNENROLLED' END AS face_status
+            FROM dim.employee e
+            JOIN dim.role r ON e.role_id = r.role_id
+            JOIN dim.department d ON e.department_id = d.department_id
+            LEFT JOIN dim.employee_biometric b ON e.employee_id = b.employee_id
+            ORDER BY e.employee_id ASC
+            """,
+            conn,
+        )
         assets_df = pd.read_sql(
             """
             SELECT a.asset_id, a.asset_name, a.asset_type, d.department_name,
@@ -105,6 +124,7 @@ def load_dashboard_data() -> dict[str, pd.DataFrame]:
 
     return {
         "principal": principal_df,
+        "enrolled_employees": enrolled_employees_df,
         "assets": assets_df,
         "telemetry": telemetry_df,
         "anomalies": anomalies_df,
@@ -129,6 +149,7 @@ st.sidebar.code(
 telemetry_df = data["telemetry"]
 anomalies_df = data["anomalies"]
 verifications_df = data["verifications"]
+enrolled_df = data["enrolled_employees"]
 
 if telemetry_df.empty:
     st.warning("No telemetry readings found in NovaWarehouse. Run src/ingestor.py first.")
@@ -138,12 +159,10 @@ batches = sorted(telemetry_df["source_batch"].unique(), reverse=True)
 selected_batch = st.sidebar.selectbox("Select Telemetry Batch", batches)
 batch_df = telemetry_df[telemetry_df["source_batch"] == selected_batch].copy()
 batch_df["recorded_at_utc"] = pd.to_datetime(batch_df["recorded_at_utc"])
-batch_df["attestation_state"] = batch_df["verification_id"].apply(
-    lambda x: "VERIFIED" if pd.notna(x) else "UNVERIFIED"
-)
 
 total_rows = len(batch_df)
 verified_rows = int(batch_df["verification_id"].notna().sum())
+enrolled_count = int((enrolled_df["face_status"] == "ENROLLED").sum())
 open_anomalies = int((anomalies_df["resolved_flag"] == 0).sum()) if not anomalies_df.empty else 0
 latest_conf = (
     float(verifications_df.iloc[0]["cv_confidence_score"])
@@ -151,11 +170,12 @@ latest_conf = (
     else 0.0
 )
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Batch Telemetry Rows", f"{total_rows:,}")
 c2.metric("Biometrically Verified Rows", f"{verified_rows:,} / {total_rows:,}")
-c3.metric("Open Security Anomalies", open_anomalies)
-c4.metric("Latest CV Match Confidence", f"{latest_conf:.4f}")
+c3.metric("Enrolled Operatives", f"{enrolled_count} / {len(enrolled_df)}")
+c4.metric("Open Security Anomalies", open_anomalies)
+c5.metric("Latest CV Match Confidence", f"{latest_conf:.4f}")
 
 tab_telemetry, tab_biometrics, tab_audit = st.tabs(
     ["Telemetry & Thresholds", "Biometric Gate & Anomalies", "DQ & Immutable Audit Ledger"]
@@ -178,7 +198,7 @@ with tab_telemetry:
             line_color="red",
             annotation_text="Alert Threshold (90.0 °C)",
         )
-        st.plotly_chart(fig_temp, use_container_width=True)
+        st.plotly_chart(fig_temp, width="stretch")
 
     with col_vib:
         fig_vib = px.line(
@@ -194,16 +214,19 @@ with tab_telemetry:
             line_color="red",
             annotation_text="Alert Threshold (7.0 mm/s)",
         )
-        st.plotly_chart(fig_vib, use_container_width=True)
+        st.plotly_chart(fig_vib, width="stretch")
 
     st.subheader("Threshold Breach Readings in Selected Batch")
     breach_df = batch_df[(batch_df["temperature_c"] > 90.0) | (batch_df["vibration_mm_s"] > 7.0)]
-    st.dataframe(breach_df, use_container_width=True, hide_index=True)
+    st.dataframe(breach_df, width="stretch", hide_index=True)
 
     st.subheader("Monitored Infrastructure Assets")
-    st.dataframe(data["assets"], use_container_width=True, hide_index=True)
+    st.dataframe(data["assets"], width="stretch", hide_index=True)
 
 with tab_biometrics:
+    st.subheader("Registered Operative Biometric Directory")
+    st.dataframe(enrolled_df, width="stretch", hide_index=True)
+
     st.subheader("Operative Facial Verification Gate History")
     if not verifications_df.empty:
         fig_conf = go.Figure(
@@ -228,15 +251,15 @@ with tab_biometrics:
             yaxis_title="Cosine Confidence Score",
             yaxis=dict(range=[0, 1]),
         )
-        st.plotly_chart(fig_conf, use_container_width=True)
-        st.dataframe(verifications_df, use_container_width=True, hide_index=True)
+        st.plotly_chart(fig_conf, width="stretch")
+        st.dataframe(verifications_df, width="stretch", hide_index=True)
 
     st.subheader("Security Anomalies & Operative Sign-Off")
-    st.dataframe(anomalies_df, use_container_width=True, hide_index=True)
+    st.dataframe(anomalies_df, width="stretch", hide_index=True)
 
 with tab_audit:
     st.subheader("Automated Data Quality & SHA-256 Manifest Checks")
-    st.dataframe(data["dq"], use_container_width=True, hide_index=True)
+    st.dataframe(data["dq"], width="stretch", hide_index=True)
 
     st.subheader("Immutable Append-Only Audit Ledger (ops.audit_ledger)")
-    st.dataframe(data["audit"], use_container_width=True, hide_index=True)
+    st.dataframe(data["audit"], width="stretch", hide_index=True)

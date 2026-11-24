@@ -1,0 +1,30 @@
+=== NOVAWAREHOUSE AIDA 2154 COMPUTER VISION THRESHOLD EVALUATION ===
+Dataset: Official OpenCV 4.x Public Sample Portraits (Apache-2.0 License) with controlled lighting, blur, distance, and occlusion perturbations.
+Limitation: Small public reference set (2 enrolled subjects, 6 genuine probes, 1 impostor pair); production deployment requires diverse multi-demographic consent-based employee trials.
+Genuine Comparisons: 6 | Impostor Comparisons: 1
+Mean Genuine Similarity: 0.8772 | Mean Impostor Similarity: 0.1699
+
+--- Threshold Sensitivity Table ---
+Threshold    | False Matches (FAR)      | Missed Matches (FRR)    
+------------------------------------------------------------------
+0.250        | 0/1 (  0.0%)           | 0/6 (  0.0%)
+0.363        | 0/1 (  0.0%)           | 0/6 (  0.0%)
+0.500        | 0/1 (  0.0%)           | 0/6 (  0.0%)
+0.750        | 0/1 (  0.0%)           | 1/6 ( 16.7%)
+
+--- Genuine Probe Scores ---
+- subject_alpha (bright_shift): cosine=0.9332
+- subject_alpha (low_light_55pct_drop): cosine=0.9480
+- subject_alpha (motion_blur): cosine=0.8542
+- subject_beta (bright_shift): cosine=0.9575
+- subject_beta (low_light_55pct_drop): cosine=0.9351
+- subject_beta (motion_blur): cosine=0.6351
+
+--- Impostor Pair Scores ---
+- subject_alpha vs subject_beta: cosine=0.1699
+
+--- Representative Failure Cases ---
+- subject_alpha_occluded_frame: No face detected in frame. Ensure good lighting and face the camera.
+- subject_beta_occluded_frame: No face detected in frame. Ensure good lighting and face the camera.
+- wide_distance_action (small off-axis face): No face detected in frame. Ensure good lighting and face the camera.
+- blank_camera_frame: No face detected in frame. Ensure good lighting and face the camera.

@@ -1,18 +1,18 @@
 # Python and environments
 __pycache__/
+*.py[cod]
 .venv/
 .env
 
-# Data and local databases
-landing_page/
+# Generated runtime data & local databases
+data/
 *.csv
 *.parquet
 *.duckdb
+*.db
+*.mat
 
-# Images
+# Local images & screenshots (keep evidence/ tracked)
 images/
 *.jpg
 *.png
-
-models/
-data/

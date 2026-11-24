@@ -1,8 +1,8 @@
-pandas
-numpy
-opencv-python
-duckdb
-dbt-core
-dbt-duckdb
-prefect
-streamlit
+opencv-python==4.11.0.86
+mediapipe==0.10.21
+numpy==2.2.3
+pandas==2.2.3
+plotly==6.0.0
+pyodbc==5.2.0
+python-dotenv==1.0.1
+streamlit==1.43.0

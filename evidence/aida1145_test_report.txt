@@ -1,0 +1,47 @@
+=== NOVAWAREHOUSE AIDA 1145 PIPELINE & SECURITY VERIFICATION ===
+
+[Test 1 - Valid Batch Ingestion]
+{
+  "source_batch": "BATCH-ASSET-CMP-01-20261124_173736",
+  "status": "INGESTED",
+  "input_count": 15,
+  "accepted_count": 15,
+  "rejected_count": 0,
+  "breaches_flagged": 0,
+  "verification": null
+}
+
+[Test 2 - Repeat Ingestion Idempotency]
+{
+  "source_batch": "BATCH-ASSET-CMP-01-20261124_173736",
+  "status": "REJECTED_DUPLICATE_BATCH",
+  "input_count": 15,
+  "accepted_count": 0,
+  "rejected_count": 15,
+  "reason": "DUPLICATE_BATCH_DETECTED: BATCH-ASSET-CMP-01-20261124_173736 already has 15 rows"
+}
+
+[Test 3 - Invalid SHA-256 Signature & Quarantine]
+{
+  "source_batch": "BATCH-ASSET-CMP-01-20261124_173736",
+  "status": "REJECTED_INVALID_SIGNATURE",
+  "input_count": 15,
+  "accepted_count": 0,
+  "rejected_count": 15,
+  "reason": "SHA256_MISMATCH expected=e472ff7e62c9e4efca2e401cc259c52c8589620f79a6036ebe3b3c5ebb821dd8 actual=d647ce3808581c56a7dd0d6f3b60fcdd56460d0d835e07ec40386ca05d2be4d7"
+}
+
+[Test 4 - Missing Required Columns & Quarantine]
+{
+  "source_batch": "BATCH-MISSING-COLS-001",
+  "status": "REJECTED_MISSING_FIELDS",
+  "input_count": 0,
+  "accepted_count": 0,
+  "rejected_count": 0,
+  "reason": "MISSING_REQUIRED_COLUMNS: ['handled_by_operative_id', 'recorded_at_utc', 'source_batch', 'vibration_mm_s']"
+}
+
+[Test 5 - SQL Server Zero-Trust RBAC Enforcement]
+PASS [RBAC Service Delete Denied]: 42000
+PASS [RBAC Direct Table Insert Denied]: 42000
+PASS [RBAC Dashboard Execute Denied]: 42000
